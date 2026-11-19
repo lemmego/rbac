@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rbac_test
+        ports: ['5432:5432']
+        # Not optional: without it the first statement races the server's
+        # startup, and the failure reads like a broken test.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      RBAC_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/rbac_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # -v because -count=1 without it prints no skips at all, and a suite
+      # that skipped reads exactly like one that passed in the exit code.
+      - name: Test
+        run: go test ./... -count=1 -v | tee test.log
+
+      - name: Nothing was skipped
+        run: |
+          if grep -q -- '--- SKIP' test.log; then
+            echo "A test skipped. The PostgreSQL suite is the only thing that runs this"
+            echo "module's DDL, so a skip here means the schema is untested."
+            grep -- '--- SKIP' test.log
+            exit 1
+          fi
+
+      - run: go test ./... -race -count=1
+
+      - name: Standalone
+        run: GOWORK=off go mod tidy && git diff --exit-code go.mod go.sum
