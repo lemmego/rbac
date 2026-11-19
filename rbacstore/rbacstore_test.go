@@ -520,3 +520,104 @@ func TestAnUnmigratedDatabaseSaysSo(t *testing.T) {
 		t.Fatalf("an unmigrated database gave %v, want ErrNotMigrated", err)
 	}
 }
+
+// A subject column that is not text needs no special configuration, and
+// that is worth a test because it is not obvious.
+//
+// A subject is an opaque STRING to this package and every statement binds it
+// as one, so a bigint column looks like it should fail with "operator does
+// not exist: bigint = text". It does not: the driver sends the parameter
+// untyped and PostgreSQL infers the type from the column it is compared to
+// or inserted into.
+//
+// The reason an application wants such a column is a safety property rather
+// than a preference. With the subject a bigint referencing the users table,
+// a composite foreign key (scope, subject) makes a cross-scope assignment
+// unrepresentable — and Postgres checks a foreign key with the referenced
+// table's owner rights, so it BYPASSES row-level security. A text subject
+// with no foreign key at all would quietly lose that guarantee.
+//
+// So this is the configuration a careful application reaches for, and this
+// test is what says it is supported. It was written after a cast knob was
+// added for it and then removed: probing the new code found that nothing
+// broke without it, which meant the knob was decoration and the real fix
+// for the application was a column NAME it had configured wrongly.
+func TestASubjectColumnThatIsNotTextWorksUnchanged(t *testing.T) {
+	dsn := os.Getenv("RBAC_POSTGRES_DSN")
+	if dsn == "" {
+		t.Fatal("RBAC_POSTGRES_DSN is not set")
+	}
+	db := connect(t, dsn)
+
+	cfg := schema()
+	cfg.AssignmentsTable = "rbactest_numeric_assignments"
+	cfg.SubjectColumn = "principal_id"
+	cfg.SubjectType = "bigint"
+
+	ctx := context.Background()
+	drop := rbacstore.DropStatements(cfg)
+	for _, statement := range drop {
+		if _, err := db.SQLDB().ExecContext(ctx, statement); err != nil {
+			t.Fatalf("clearing: %v", err)
+		}
+	}
+	for _, statement := range rbacstore.SchemaStatements(cfg) {
+		if _, err := db.SQLDB().ExecContext(ctx, statement); err != nil {
+			t.Fatalf("creating the schema: %v\n\nstatement:\n%s", err, statement)
+		}
+	}
+	t.Cleanup(func() {
+		for _, statement := range drop {
+			_, _ = db.SQLDB().ExecContext(context.Background(), statement)
+		}
+	})
+
+	store := rbacstore.New(cfg.Config)
+	if _, err := store.SyncPermissions(ctx, db, catalog(t)); err != nil {
+		t.Fatalf("syncing the catalogue: %v", err)
+	}
+
+	in(t, db, "acme", func(tx *orm.Tx) {
+		role, err := store.CreateRole(ctx, tx, "Editor", "Edits things")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Grant(ctx, tx, role.ID, "post.create"); err != nil {
+			t.Fatal(err)
+		}
+		// A decimal subject, which is what an application keying on a user
+		// id passes.
+		if err := store.Assign(ctx, tx, "42", role.ID); err != nil {
+			t.Fatalf("assigning a numeric subject: %v", err)
+		}
+
+		set, err := store.PermissionsOf(ctx, tx, "42")
+		if err != nil {
+			t.Fatalf("reading a numeric subject's permissions: %v", err)
+		}
+		if !set.Has("post.create") {
+			t.Errorf("the subject holds %v, want post.create", set.Codes())
+		}
+
+		// And somebody else holds nothing, so the cast is not making every
+		// row match.
+		other, err := store.PermissionsOf(ctx, tx, "43")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other.Len() != 0 {
+			t.Errorf("subject 43 holds %v, want nothing", other.Codes())
+		}
+
+		if err := store.Unassign(ctx, tx, "42", role.ID); err != nil {
+			t.Fatalf("unassigning a numeric subject: %v", err)
+		}
+		set, err = store.PermissionsOf(ctx, tx, "42")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if set.Len() != 0 {
+			t.Errorf("after unassigning, the subject holds %v", set.Codes())
+		}
+	})
+}
