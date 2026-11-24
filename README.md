@@ -55,8 +55,8 @@ picked another.
 
 ```go
 func (h *Handler) Grant(c app.Context) error {
-    return h.db.TenantTx(c.Ctx(), workspaceID, func(tx *orm.Tx) error {
-        return h.roles.Grant(c.Ctx(), tx, roleID, "post.publish")
+    return h.db.TenantTx(c.RequestContext(), workspaceID, func(tx *orm.Tx) error {
+        return h.roles.Grant(c.RequestContext(), tx, roleID, "post.publish")
     })
 }
 ```
@@ -101,8 +101,8 @@ making.
 
 ```go
 // In middleware, after auth has run.
-set, err := store.PermissionsOf(c.Ctx(), tx, subject)
-c.WithContext(rbacauthz.WithSet(c.Ctx(), set))
+set, err := store.PermissionsOf(c.RequestContext(), tx, subject)
+c.WithContext(rbacauthz.WithSet(c.RequestContext(), set))
 ```
 
 `SetFrom` answers `(Set, bool)`, and the bool is **"were any loaded"**, not
